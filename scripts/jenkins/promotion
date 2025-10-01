@@ -1,0 +1,228 @@
+pipeline {
+    agent any
+
+    parameters {
+        string(
+            name: 'RELEASE',
+            description: 'Release name to deploy (e.g., stock-nse-india-master-2024.01.15-1)'
+        )
+        choice(
+            name: 'ENV',
+            choices: ['dev', 'qa', 'prod'],
+            description: 'Target environment'
+        )
+        string(
+            name: 'DEPLOY_DIRECTORY',
+            defaultValue: 'projects',
+            description: 'Deployment directory on target server'
+        )
+    }
+
+    environment {
+        TARGET_HOST = '129.213.146.93'
+        SSH_KEY = '/projects/ssh-key-2023-05-29.key'
+    }
+
+    stages {
+        stage('Validate') {
+            steps {
+                script {
+                    // Validate required parameters
+                    if (!params.RELEASE) {
+                        error("RELEASE parameter is required")
+                    }
+                    if (!params.ENV) {
+                        error("ENV parameter is required")
+                    }
+
+                    echo "Validating deployment parameters..."
+                    echo "Release: ${params.RELEASE}"
+                    echo "Environment: ${params.ENV}"
+                    echo "Deploy Directory: ${params.DEPLOY_DIRECTORY}"
+                    echo "Target Host: ${env.TARGET_HOST}"
+                }
+            }
+        }
+
+        stage('Deploy') {
+            steps {
+                script {
+                    // Set the port number based on the environment
+                    def port
+                    if (params.ENV == 'dev') {
+                        port = '3000'
+                    } else if (params.ENV == 'qa') {
+                        port = '3001'
+                    } else if (params.ENV == 'prod') {
+                        port = '3002'
+                    } else {
+                        error("Unknown environment: ${params.ENV}")
+                    }
+
+                    echo "Deploying ${params.RELEASE} to ${params.ENV} on port ${port}"
+
+                    // Validate release package exists
+                    def packagePath = "/projects/temp/${params.RELEASE}.tar.gz"
+                    sh "test -f '${packagePath}' || (echo 'Release package not found: ${packagePath}' && exit 1)"
+
+                    // Validate SSH key exists
+                    sh "test -f '${env.SSH_KEY}' || (echo 'SSH key not found: ${env.SSH_KEY}' && exit 1)"
+
+                    // Create remote directory structure
+                    echo "Creating remote directory structure..."
+                    sh """
+                        ssh -i '${env.SSH_KEY}' -o StrictHostKeyChecking=no ubuntu@${env.TARGET_HOST} '
+                            mkdir -p /home/ubuntu/projects/stock-nse-india/${params.ENV}
+                            mkdir -p /home/ubuntu/projects/logs/stock-nse-india
+                        '
+                    """
+
+                    // Copy release package to target server
+                    echo "Copying release package to target server..."
+                    sh """
+                        scp -i '${env.SSH_KEY}' -o StrictHostKeyChecking=no '${packagePath}' ubuntu@${env.TARGET_HOST}:/home/ubuntu/projects/stock-nse-india/
+                    """
+
+                    // Extract and setup on server
+                    echo "Extracting and setting up application..."
+                    sh """
+                        ssh -i '${env.SSH_KEY}' -o StrictHostKeyChecking=no ubuntu@${env.TARGET_HOST} '
+                            cd /home/ubuntu/projects/stock-nse-india/
+                            
+                            # Extract release
+                            tar -xzf ${params.RELEASE}.tar.gz
+                            
+                            # Remove old deployment if exists
+                            rm -rf ${params.ENV}/current
+                            
+                            # Move new deployment to environment directory
+                            mv ${params.RELEASE} ${params.ENV}/current
+                            
+                            # Clean up archive
+                            rm -f ${params.RELEASE}.tar.gz
+                            
+                            echo "✅ Application extracted and ready"
+                        '
+                    """
+
+                    // Stop existing application if running
+                    echo "Stopping existing application..."
+                    sh """
+                        ssh -i '${env.SSH_KEY}' -o StrictHostKeyChecking=no ubuntu@${env.TARGET_HOST} '
+                            PID_FILE="/home/ubuntu/projects/stock-nse-india/${params.ENV}/stock-nse-india.pid"
+                            if [ -f "\$PID_FILE" ]; then
+                                OLD_PID=\$(cat "\$PID_FILE")
+                                if ps -p \$OLD_PID > /dev/null 2>&1; then
+                                    echo "Stopping existing application (PID: \$OLD_PID)..."
+                                    kill \$OLD_PID
+                                    sleep 5
+                                    # Force kill if still running
+                                    if ps -p \$OLD_PID > /dev/null 2>&1; then
+                                        kill -9 \$OLD_PID
+                                    fi
+                                fi
+                                rm -f "\$PID_FILE"
+                            fi
+                        '
+                    """
+
+                    // Start new application
+                    echo "Starting new application..."
+                    sh """
+                        ssh -i '${env.SSH_KEY}' -o StrictHostKeyChecking=no ubuntu@${env.TARGET_HOST} '
+                            cd /home/ubuntu/projects/stock-nse-india/${params.ENV}/current
+                            
+                            # Set environment variables
+                            export NODE_ENV=${params.ENV}
+                            export PORT=${port}
+                            
+                            # Start application in background
+                            nohup node build/server.js > /home/ubuntu/projects/logs/stock-nse-india/stock-nse-india-${params.ENV}.log 2>&1 &
+                            NEW_PID=\$!
+                            
+                            # Save PID
+                            echo \$NEW_PID > /home/ubuntu/projects/stock-nse-india/${params.ENV}/stock-nse-india.pid
+                            
+                            echo "✅ Application started with PID: \$NEW_PID"
+                            echo "🌐 URL: http://${env.TARGET_HOST}:${port}"
+                            echo "📊 API Docs: http://${env.TARGET_HOST}:${port}/api-docs"
+                            echo "🔍 GraphQL: http://${env.TARGET_HOST}:${port}/graphql"
+                        '
+                    """
+                }
+            }
+        }
+
+        stage('Health Check') {
+            steps {
+                script {
+                    def port
+                    if (params.ENV == 'dev') {
+                        port = '3000'
+                    } else if (params.ENV == 'qa') {
+                        port = '3001'
+                    } else if (params.ENV == 'prod') {
+                        port = '3002'
+                    }
+
+                    echo "Waiting for application to start..."
+                    sleep(time: 30, unit: 'SECONDS')
+
+                    echo "Performing health check..."
+                    try {
+                        sh """
+                            curl -f -s -o /dev/null -w "%{http_code}" http://${env.TARGET_HOST}:${port}/ | grep -q "200"
+                        """
+                        echo "✅ Health check passed - Application is running successfully"
+                    } catch (Exception e) {
+                        echo "⚠️ Health check failed - Application may still be starting"
+                        echo "Check application logs: ssh ubuntu@${env.TARGET_HOST} 'tail -f /home/ubuntu/projects/logs/stock-nse-india/stock-nse-india-${params.ENV}.log'"
+                    }
+                }
+            }
+        }
+    }
+
+    post {
+        success {
+            script {
+                def port
+                if (params.ENV == 'dev') {
+                    port = '3000'
+                } else if (params.ENV == 'qa') {
+                    port = '3001'
+                } else if (params.ENV == 'prod') {
+                    port = '3002'
+                }
+
+                echo """
+                ✅ Stock NSE India deployment completed successfully!
+
+                Release: ${params.RELEASE}
+                Environment: ${params.ENV}
+                Host: ${env.TARGET_HOST}
+                Port: ${port}
+                
+                🌐 Application URL: http://${env.TARGET_HOST}:${port}
+                📊 API Documentation: http://${env.TARGET_HOST}:${port}/api-docs
+                🔍 GraphQL Playground: http://${env.TARGET_HOST}:${port}/graphql
+                
+                📋 Sample API Endpoints:
+                - Market Status: http://${env.TARGET_HOST}:${port}/api/marketStatus
+                - Equity Details: http://${env.TARGET_HOST}:${port}/api/equity/RELIANCE
+                - All Indices: http://${env.TARGET_HOST}:${port}/api/indices
+
+                📝 Logs: ssh ubuntu@${env.TARGET_HOST} 'tail -f /home/ubuntu/projects/logs/stock-nse-india/stock-nse-india-${params.ENV}.log'
+                """
+            }
+        }
+        failure {
+            echo """
+            ❌ Stock NSE India deployment failed!
+
+            Check the Jenkins logs for details.
+            Verify SSH connectivity and release package availability.
+            """
+        }
+    }
+}

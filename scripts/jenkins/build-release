@@ -1,0 +1,211 @@
+pipeline {
+    agent any
+
+    parameters {
+        string(
+            name: 'BRANCH',
+            defaultValue: 'master',
+            description: 'Branch to build from'
+        )
+        choice(
+            name: 'ENV',
+            choices: ['dev', 'qa', 'prod'],
+            description: 'Target environment'
+        )
+        string(
+            name: 'DEPLOY_DIRECTORY',
+            defaultValue: '/projects/temp/',
+            description: 'Deployment directory on target server'
+        )
+    }
+
+    // Use system Node.js - will be installed manually on Jenkins server
+    environment {
+        NODE_HOME = '/usr/local/bin'
+        PATH = "${env.NODE_HOME}:${env.PATH}"
+    }
+
+    stages {
+        stage('Checkout') {
+            steps {
+                // Explicit Git checkout with credentials
+                checkout([$class: 'GitSCM',
+                         branches: [[name: "*/${params.BRANCH}"]],
+                         userRemoteConfigs: [[
+                             url: 'https://github.com/makki24/stock-nse-india.git',
+                             credentialsId: 'github-credentials'
+                         ]]])
+
+                echo "Checked out branch: ${params.BRANCH}"
+            }
+        }
+
+        stage('Validate Environment') {
+            steps {
+                echo "🔍 Validating build environment..."
+                
+                sh '''
+                    echo "Node.js version: $(node --version)"
+                    echo "NPM version: $(npm --version)"
+                    
+                    # Validate Node.js version (18+)
+                    NODE_VERSION=$(node --version | cut -d'v' -f2 | cut -d'.' -f1)
+                    if [ "$NODE_VERSION" -lt 18 ]; then
+                        echo "❌ Error: Node.js 18+ required. Current version: $(node --version)"
+                        exit 1
+                    fi
+                    
+                    echo "✅ Environment validation passed"
+                '''
+            }
+        }
+
+        stage('Install Dependencies') {
+            steps {
+                echo "📦 Installing dependencies..."
+                
+                sh '''
+                    # Clean previous installations
+                    rm -rf node_modules/
+                    npm cache clean --force
+                    
+                    # Install dependencies
+                    npm install
+                    
+                    echo "✅ Dependencies installed successfully"
+                '''
+            }
+        }
+
+        stage('Test') {
+            steps {
+                echo "🧪 Running tests..."
+
+                sh '''
+                    echo "=== Running Stock NSE India Tests ==="
+                    
+                    # Run tests with timeout
+                    npm test
+                    
+                    echo "✅ Tests completed successfully"
+                '''
+            }
+        }
+
+        stage('Build') {
+            steps {
+                script {
+                    // Ensure we have a valid branch name
+                    def branchName = params.BRANCH ?: 'master'
+                    if (branchName.trim().isEmpty()) {
+                        branchName = 'master'
+                    }
+
+                    echo "DEBUG: BRANCH parameter = '${params.BRANCH}'"
+                    echo "DEBUG: Resolved branchName = '${branchName}'"
+
+                    // Generate version number using VersionNumber plugin
+                    env.RELEASE_NAME = VersionNumber(
+                        versionNumberString: "stock-nse-india-${branchName}-" + '${BUILD_DATE_FORMATTED, "yyyy.MM.dd"}-${BUILDS_TODAY}'
+                    )
+
+                    echo "DEBUG: Generated RELEASE_NAME = '${env.RELEASE_NAME}'"
+                }
+
+                echo "🔨 Building release: ${env.RELEASE_NAME}"
+                echo "Workspace: ${env.WORKSPACE}"
+                echo "Target environment: ${params.ENV}"
+
+                // Create build directory
+                sh 'mkdir -p /projects/temp'
+
+                // Build the application
+                sh '''
+                    echo "🔨 Building TypeScript application..."
+                    npm run build
+                    
+                    # Validate build output
+                    if [ ! -f "build/server.js" ]; then
+                        echo "❌ Error: Build failed - server.js not found"
+                        exit 1
+                    fi
+                    
+                    echo "✅ Build completed successfully"
+                '''
+
+                // Create deployment package
+                script {
+                    sh """
+                        echo "📦 Creating deployment package..."
+                        
+                        # Create release directory
+                        RELEASE_DIR="/projects/temp/${env.RELEASE_NAME}"
+                        mkdir -p "\$RELEASE_DIR"
+                        
+                        # Copy built application
+                        cp -r build/ "\$RELEASE_DIR/"
+                        cp package.json "\$RELEASE_DIR/"
+                        cp package-lock.json "\$RELEASE_DIR/"
+                        
+                        # Install production dependencies in release directory
+                        cd "\$RELEASE_DIR"
+                        npm install --production --silent
+                        
+                        # Create startup script
+                        cat > "\$RELEASE_DIR/start.sh" << 'EOF'
+#!/bin/bash
+# Stock NSE India startup script
+
+# Set environment variables
+export NODE_ENV=\${NODE_ENV:-production}
+export PORT=\${PORT:-3000}
+
+# Start the application
+echo "🚀 Starting Stock NSE India API on port \$PORT..."
+node build/server.js
+EOF
+                        
+                        chmod +x "\$RELEASE_DIR/start.sh"
+                        
+                        # Create archive
+                        cd /projects/temp
+                        tar -czf "${env.RELEASE_NAME}.tar.gz" "${env.RELEASE_NAME}/"
+                        
+                        echo "✅ Deployment package created: ${env.RELEASE_NAME}.tar.gz"
+                    """
+                }
+
+                echo "Build completed successfully"
+            }
+        }
+
+        stage('Trigger Deployment') {
+            steps {
+                echo "Triggering deployment job..."
+                build job: 'StockNSEIndia-Promotion',
+                      wait: false,
+                      parameters: [
+                        string(name: 'RELEASE', value: "${env.RELEASE_NAME}"),
+                        string(name: 'ENV', value: "${params.ENV}"),
+                        string(name: 'DEPLOY_DIRECTORY', value: "${params.DEPLOY_DIRECTORY}")
+                      ]
+            }
+        }
+    }
+
+    post {
+        always {
+            // Archive the built package
+            archiveArtifacts artifacts: 'build/**/*', fingerprint: true
+
+            // Clean workspace
+            cleanWs()
+        }
+        success {
+            echo "✅ Build completed successfully!"
+        }
+        failure {
+            echo "❌ Build failed!"
+        }
+    }
+}
