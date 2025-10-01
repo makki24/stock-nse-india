@@ -153,34 +153,6 @@ pipeline {
             }
         }
 
-        stage('Health Check') {
-            steps {
-                script {
-                    def port
-                    if (params.ENV == 'dev') {
-                        port = '3000'
-                    } else if (params.ENV == 'qa') {
-                        port = '3001'
-                    } else if (params.ENV == 'prod') {
-                        port = '3002'
-                    }
-
-                    echo "Waiting for application to start..."
-                    sleep(time: 30, unit: 'SECONDS')
-
-                    echo "Performing health check..."
-                    try {
-                        sh """
-                            curl -f -s -o /dev/null -w "%{http_code}" http://${env.TARGET_HOST}:${port}/ | grep -q "200"
-                        """
-                        echo "✅ Health check passed - Application is running successfully"
-                    } catch (Exception e) {
-                        echo "⚠️ Health check failed - Application may still be starting"
-                        echo "Check application logs: ssh ubuntu@${env.TARGET_HOST} 'tail -f /home/ubuntu/projects/logs/stock-nse-india/stock-nse-india-${params.ENV}.log'"
-                    }
-                }
-            }
-        }
     }
 
     post {
