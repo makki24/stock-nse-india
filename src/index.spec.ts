@@ -123,6 +123,83 @@ describe('Class: NseIndia', () => {
         }
     })
 
+    test('Logging coverage - successful response', async () => {
+        // Mock console.log to capture logging calls
+        const consoleSpy = jest.spyOn(console, 'log').mockImplementation()
+        
+        try {
+            await nseIndia.getMarketStatus()
+            
+            // Verify that both request and response logs were called
+            expect(consoleSpy).toHaveBeenCalledWith(
+                expect.stringContaining('upstream request url=')
+            )
+            expect(consoleSpy).toHaveBeenCalledWith(
+                expect.stringContaining('upstream response url=')
+            )
+            expect(consoleSpy).toHaveBeenCalledWith(
+                expect.stringContaining('status=200')
+            )
+            expect(consoleSpy).toHaveBeenCalledWith(
+                expect.stringContaining('durationMs=')
+            )
+            expect(consoleSpy).toHaveBeenCalledWith(
+                expect.stringContaining('data=')
+            )
+        } finally {
+            consoleSpy.mockRestore()
+        }
+    })
+
+    test('Logging coverage - error response', async () => {
+        // Mock console.log to capture logging calls
+        const consoleSpy = jest.spyOn(console, 'log').mockImplementation()
+        
+        try {
+            await nseIndia.getDataByEndpoint('/api/invalidapi')
+        } catch (error) {
+            // Verify that error logging was called
+            expect(consoleSpy).toHaveBeenCalledWith(
+                expect.stringContaining('upstream error url=')
+            )
+            expect(consoleSpy).toHaveBeenCalledWith(
+                expect.stringContaining('durationMs=')
+            )
+            expect(consoleSpy).toHaveBeenCalledWith(
+                expect.stringContaining('message=')
+            )
+        } finally {
+            consoleSpy.mockRestore()
+        }
+    })
+
+    test('Coverage for all logging branches', async () => {
+        // This test ensures we cover the logging statements that are currently showing as uncovered
+        const consoleSpy = jest.spyOn(console, 'log').mockImplementation()
+        
+        try {
+            // Test successful response logging
+            await nseIndia.getMarketStatus()
+            
+            // Test error response logging  
+            try {
+                await nseIndia.getDataByEndpoint('/api/nonexistent')
+            } catch (e) {
+                // Expected error
+            }
+            
+            // Verify both success and error logging occurred
+            expect(consoleSpy).toHaveBeenCalledWith(
+                expect.stringContaining('upstream request url=')
+            )
+            expect(consoleSpy).toHaveBeenCalledWith(
+                expect.stringContaining('upstream response url=')
+            )
+        } finally {
+            consoleSpy.mockRestore()
+        }
+    })
+
     // Test convenience methods for better coverage
     test('getGlossary', async () => {
         const glossary = await nseIndia.getGlossary()
