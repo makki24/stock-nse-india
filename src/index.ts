@@ -1,3 +1,4 @@
+/* eslint-disable no-console */
 import axios from 'axios'
 import UserAgent from 'user-agents'
 import { getDateRangeChunks, sleep } from './utils'
@@ -95,17 +96,40 @@ export class NseIndia {
                 await sleep(500)
             }
             this.noOfConnections++
+            const startedAt = process.hrtime.bigint();
+            const headers = {
+                ...this.baseHeaders,
+                'Cookie': await this.getNseCookies(),
+                'User-Agent': this.userAgent
+            };
+
+            // Log request start (no headers)
+            console.log(
+                `[${new Date().toISOString()}] upstream request url=${url}`
+            );
+
             try {
-                const response = await axios.get(url, {
-                    headers: {
-                        ...this.baseHeaders,
-                        'Cookie': await this.getNseCookies(),
-                        'User-Agent': this.userAgent
-                    }
-                })
+                const response = await axios.get(url, { headers });
+                const dur = Number(process.hrtime.bigint() - startedAt) / 1e6;
+                const size = (() => {
+                    try { return JSON.stringify(response.data)?.length || 0; } catch { return 0; }
+                })();
+
+                console.log(
+                    `[${new Date().toISOString()}] upstream response url=${url} ` +
+                    `status=${response.status} durationMs=${Math.round(dur)} responseSize=${size} ` +
+                    `data=${JSON.stringify(response.data)}`
+                );
+
                 this.noOfConnections--
                 return response.data
-            } catch (error) {
+            } catch (error: any) {
+                const dur = Number(process.hrtime.bigint() - startedAt) / 1e6;
+                console.log(
+                    `[${new Date().toISOString()}] upstream error url=${url} ` +
+                    `durationMs=${Math.round(dur)} message="${error?.message || 'error'}" ` +
+                    `code=${error?.code || ''} status=${error?.response?.status || ''}`
+                );
                 hasError = true
                 retries++
                 this.noOfConnections--

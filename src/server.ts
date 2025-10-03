@@ -13,6 +13,7 @@ import { openapiSpecification } from './swaggerDocOptions'
 import path from 'path';
 import { mainRouter } from './routes'
 import cors from 'cors';
+import crypto from 'crypto';
 
 const app = express()
 const port = process.env.PORT || 3000
@@ -47,6 +48,35 @@ app.use(cors({
   allowedHeaders: corsHeaders,
   credentials: process.env.CORS_CREDENTIALS !== 'false'
 }));
+
+// Parse request bodies for logging
+app.use(express.json({ limit: '1mb' }));
+app.use(express.urlencoded({ extended: true, limit: '1mb' }));
+
+// Trust proxy to get correct client IP behind load balancers
+app.set('trust proxy', true);
+
+// Request logging middleware
+app.use((req, res, next) => {
+  const start = process.hrtime.bigint();
+  const reqId = req.header('x-request-id') || crypto.randomUUID();
+
+  res.setHeader('x-request-id', reqId);
+
+  res.on('finish', () => {
+    const durationMs = Number(process.hrtime.bigint() - start) / 1e6;
+    // Plain text logging with no masking
+    console.log(
+      `[${new Date().toISOString()}] http reqId=${reqId} ip=${req.ip} ` +
+      `method=${req.method} path=${req.originalUrl} status=${res.statusCode} ` +
+      `durationMs=${Math.round(durationMs)} ua="${req.get('user-agent') || ''}" ` +
+      `headers=${JSON.stringify(req.headers)} query=${JSON.stringify(req.query)} ` +
+      `body=${JSON.stringify((req as any).body || {})}`
+    );
+  });
+
+  next();
+});
 
 app.use(mainRouter)
 app.use('/api-docs', swaggerUi.serve as any);
